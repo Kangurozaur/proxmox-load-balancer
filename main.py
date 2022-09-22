@@ -1,19 +1,16 @@
+from copy import deepcopy
+from datetime import datetime
+from math import floor
 from proxmoxer import ProxmoxAPI
 import yaml
+import time
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdate
+import matplotlib.ticker as mtick
+import numpy as np
 
 
 class VmUsageRecord:
-    maxcpu = 0
-    netout = 0
-    netin  = 0
-    cpu    = 0
-    diskread = 0
-    diskwrite = 0
-    mem = 0
-    maxdisk = 0
-    maxmem = 0
-    time = 0
-    disk = 0
 
     def __init__(self, time, disk, maxdisk, cpu, maxcpu, netin, netout, diskread, diskwrite, mem, maxmem):
         self.time = time
@@ -29,18 +26,6 @@ class VmUsageRecord:
         self.maxmem = maxmem
 
 class NodeUsageRecord:
-    maxcpu = 0
-    netout = 0
-    netin  = 0
-    cpu    = 0
-    swapused = 0
-    swaptotal = 0
-    memtotal = 0
-    memused = 0
-    time = 0
-    loadavg = 0
-    iowait = 0
-    rootused = 0
 
     def __init__(self, time, maxcpu, netout, netin, cpu, swapused, swaptotal, memtotal, memused, loadavg, iowait, rootused, roottotal):
         self.time = time
@@ -57,37 +42,66 @@ class NodeUsageRecord:
         self.cpu = cpu
         self.roottotal = roottotal
 
-
 class VM:
-    id = 0
-    utilization = []
 
-    def __init__(self, id, utilization = []):
+    def __init__(self, id):
         self.id = id
-        self.utilization = utilization
+        self.utilization = []
 
     def add_usage_record(record:VmUsageRecord):
         self.utilization.add(record)
 
 class Node:
-    name = ""
-    vms = []
-    utilization = []
 
-    def __init__(self, name = "", vms = [], utilization = []):
+    def __init__(self, name = ""):
         self.name = name
-        self.vms = vms
-        self.utilization = utilization
+        self.vms = []
+        self.utilization = []
     
-    def add_usage_record(record:NodeUsageRecord):
+    def add_usage_record(self, record:NodeUsageRecord):
         self.utilization.add(record)
 
+    def plot(self, fig, ax, n_aggregate=1):
+        # Plot Node usage records
+        n_time_points = len(self.utilization)
+        xpoints = []
+        ypoints = []
 
+        for i in range(0, floor(n_time_points/n_aggregate)):
+            time_sum = 0.0
+            sum = 0.0
+
+            for j in range(0, n_aggregate):
+                #print("\t{0}".format(datetime.fromtimestamp( self.utilization[i*n_aggregate + j].time )))
+                time_sum += self.utilization[i*n_aggregate + j].time
+                
+                for vm in self.vms:
+                    sum += vm.utilization[i*n_aggregate + j].cpu
+            
+            #print(datetime.fromtimestamp( time_sum/n_aggregate ))
+            xpoints.append(mdate.epoch2num(time_sum/n_aggregate))
+
+            ypoints.append(sum/n_aggregate)
+
+        ax.set_title(self.name, fontstyle='italic')
+        ax.plot_date(xpoints, ypoints, '-o')
+
+        # Format to show dates
+        date_fmt = '%d-%m-%y %H:%M:%S'
+        date_formatter = mdate.DateFormatter(date_fmt)
+        ax.xaxis.set_major_formatter(date_formatter)
+        
+
+        # Format to show %
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0,1))
+
+        fig.autofmt_xdate()
+        ax.axhline(y = 1, color = 'r', linestyle = '-')
 
 class Cluster:
-    def __init__(self, name, nodes = []):
+    def __init__(self, name):
         self.name = name
-        self.nodes = nodes
+        self.nodes = []
 
 def load_cluster_info() -> Cluster:
 
@@ -111,12 +125,13 @@ def load_cluster_info() -> Cluster:
 
     proxmox = ProxmoxAPI(config["connection"]["url"]["ip"], user=config["connection"]["auth"]["username"], password=config["connection"]["auth"]["password"], verify_ssl=False)
 
-    for node in proxmox.nodes.get():
+    nodes_list = proxmox.nodes.get()
+    for node in nodes_list:
         
         current_node = Node(node["node"])
 
         # Gather and add node utilization history
-        node_usage_data = proxmox.nodes(node["node"]).rrddata.get(timeframe="week", cf="MAX")
+        node_usage_data = proxmox.nodes(node["node"]).rrddata.get(timeframe="week", cf="AVERAGE")
         for data_entry in node_usage_data:
             current_node.utilization.append(
                 NodeUsageRecord(
@@ -141,30 +156,50 @@ def load_cluster_info() -> Cluster:
 
             current_vm = VM(vm["vmid"])
 
+            # TODO: Whether to only check running VMs?
+            if vm["status"] == "stopped":
+                continue
+
             vm_usage_data = proxmox.nodes(node["node"]).qemu(vm['vmid']).rrddata.get(timeframe="week", cf="AVERAGE")
             for data_entry in vm_usage_data:
-                current_vm.utilization.append(
-                    VmUsageRecord(
-                        data_entry["time"],
-                        data_entry["disk"],
-                        data_entry["maxdisk"],
-                        data_entry["cpu"],
-                        data_entry["maxcpu"],
-                        data_entry["netin"],
-                        data_entry["netout"],
-                        data_entry["diskread"],
-                        data_entry["diskwrite"],
-                        data_entry["mem"],
-                        data_entry["maxmem"]
+                try:
+                    current_vm.utilization.append(
+                        VmUsageRecord(
+                            data_entry["time"],
+                            data_entry["disk"],
+                            data_entry["maxdisk"],
+                            data_entry["cpu"],
+                            data_entry["maxcpu"],
+                            data_entry["netin"],
+                            data_entry["netout"],
+                            data_entry["diskread"],
+                            data_entry["diskwrite"],
+                            data_entry["mem"],
+                            data_entry["maxmem"]
+                        )
                     )
-                )
+                except:
+                    # Data entry doesn't fit schema
+                    print("Data entry doesn't fit the schema for:\n{0}".format(vm["name"]))
+                    for key in data_entry.keys():
+                        print("\t{0}: {1}".format(key,data_entry[key]))
             # Add VM to corresponding node
             current_node.vms.append(current_vm)
-        cluster.nodes.append(current_node)
+        cluster.nodes.append(deepcopy(current_node))
+        del current_node
     return cluster
-
+def plot_cluster_cpu_usage(cluster):
+    fig, (ax1,ax2,ax3) = plt.subplots(1,3)
+    cluster.nodes[0].plot(fig, ax1, 1)
+    cluster.nodes[1].plot(fig, ax2, 1)
+    cluster.nodes[2].plot(fig, ax3, 1)
+    plt.show()
 def main():
+    start_time = time.time()
     cluster = load_cluster_info()
+    print("Cluster information loaded in --- %s seconds ---" % round(time.time() - start_time,3))
 
+    plot_cluster_cpu_usage(cluster)
 if __name__ == "__main__":
     main()
+
