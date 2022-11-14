@@ -48,7 +48,6 @@ class NodeUsageRecord:
     def __str__(self):
         return "time: {0},\nmaxcpu: {1},\nnetout: {2},\nnetin: {3},\ncpu: {4}, \nswapused:{5}, \nswaptotal:{6}, \nmemtotal:{7}, \nmemused:{8}, \nloadavg:{9},\niowait:{10},\nrootused:{11},\nroottotal:{12}".format(self.time, self.maxcpu, self.netout, self.netin, self.cpu, self.swapused, self.swaptotal, self.memtotal, self.memused, self.loadavg, self.iowait, self.rootused, self.roottotal)
 
-
 class VM:
 
     def __init__(self, id):
@@ -83,6 +82,7 @@ class Node:
         for index, record in enumerate(self.utilization):
             if timestamp == record.time:
                 return index, record
+        return NodeUsageRecord(timestamp,0,0,0,0,0,0,0,0,0,0,0,0)
         raise Exception("There are no utilization records for {0} timestamp for node {1}".format(timestamp, self.name))
 
     def get_vm_by_vmid(self, vmid):
@@ -99,7 +99,7 @@ class Node:
             for vm in self.vms:
                 _, current_vm_utilization_record = vm.get_utilization_by_timestamp(self.utilization[i].time)
                 # Include number of cores in calculation
-                cpu_utilization_sum += current_vm_utilization_record.cpu * current_vm_utilization_record.maxcpu
+                cpu_utilization_sum += (current_vm_utilization_record.cpu * current_vm_utilization_record.maxcpu)/self.vcpu_ratio
             aggregate_utilization.append(cpu_utilization_sum)
         self.aggregate_utilization = aggregate_utilization
 
@@ -158,10 +158,17 @@ class Cluster:
             #    else:
                     total_sum += record
         return total_sum/(len(self.nodes[0].aggregate_utilization * len(self.nodes)))
+    
+    # Get names of all nodes
+    def get_node_names(self):
+        node_names = []
+        for node in self.nodes:
+            node_names.append(node.name)
+        return node_names
 
 # Pulls cluster state for a given timeframe from ProxMox API
 # returns a Cluster state object
-def load_cluster_info() -> Cluster:
+def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
 
     cluster = Cluster("cluster_1")
 
@@ -178,7 +185,7 @@ def load_cluster_info() -> Cluster:
         current_node = Node(node["node"])
 
         # Gather and add node utilization history
-        node_usage_data = proxmox.nodes(node["node"]).rrddata.get(timeframe="week", cf="AVERAGE")
+        node_usage_data = proxmox.nodes(node["node"]).rrddata.get(timeframe=timeframe, cf=cf)
         for data_entry in node_usage_data:
             current_node.utilization.append(
                 NodeUsageRecord(
@@ -227,9 +234,22 @@ def load_cluster_info() -> Cluster:
                     )
                 except:
                     # Data entry doesn't fit schema
-                    print("Data entry doesn't fit the schema for:\n{0}".format(vm["name"]))
+                    print("Data entry doesn't fit the schema for:\n{0}\nAdding empty usage.".format(vm["name"]))
                     for key in data_entry.keys():
                         print("\t{0}: {1}".format(key,data_entry[key]))
+                    current_vm.utilization.append(VmUsageRecord(
+                        data_entry["time"],
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ))
             # Add VM to corresponding node
             current_node.vms.append(current_vm)
         cluster.nodes.append(deepcopy(current_node))
@@ -238,35 +258,49 @@ def load_cluster_info() -> Cluster:
 
 
 
-def plot_cluster_cpu_usage(cluster):
+def plot_cluster_cpu_usage(cluster: Cluster, node_names_list = []):
+    
     n_nodes = len(cluster.nodes)
+
+    # If node_names specified, check if node_names specified exist in cluster
+    if node_names_list != []:
+        node_names = cluster.get_node_names()
+        for node_name in node_names_list:
+            if node_name not in node_names:
+                raise Exception("Node with name: {0} does not exist in cluster: {1}".format(node_name, cluster.name))
+        n_nodes = len(node_names_list)
+    
+    
     fig, ax = plt.subplots(n_nodes+1,1)
 
-    x_points = []
+    xpoints = []
     y_sum = []
     y_sum_ceiling = []
-    #TODO: Code cleanup
-    for i in range(0, n_nodes):
-        cluster.nodes[i].calculate_aggregate_utilization()
-        # Calculate aggregated CPU utilization
-        if i==0:
-            (xpoints,y_sum) = cluster.nodes[i].plot(fig, ax[i],1)
-            
-            y_temp = deepcopy(y_sum)
-            # Ceiling of 1.0 for each element
-            #for j in range(0, len(y_temp)):
-            #    if y_temp[j] > 1.0:
-            #        y_temp[j] = 1.0
-            y_sum_ceiling = y_temp
-        else:
-            (_ ,y_temp) = cluster.nodes[i].plot(fig, ax[i],1)
-            y_sum = list(map(lambda a,b: a + b, y_sum, y_temp))
+    # Subplot index
+    plot_index = 0
+    for i in range(0, len(cluster.nodes)):
+        if node_names_list == [] or cluster.nodes[i].name in node_names_list:
+            cluster.nodes[i].calculate_aggregate_utilization()
+            # Calculate aggregated CPU utilization
+            if plot_index == 0:
+                (xpoints,y_sum) = cluster.nodes[i].plot(fig, ax[plot_index], 1)
+                
+                y_temp = deepcopy(y_sum)
+                # Ceiling of 1.0 for each element
+                #for j in range(0, len(y_temp)):
+                #    if y_temp[j] > 1.0:
+                #        y_temp[j] = 1.0
+                y_sum_ceiling = y_temp
+            else:
+                (_ ,y_temp) = cluster.nodes[i].plot(fig, ax[plot_index], 1)
+                y_sum = list(map(lambda a,b: a + b, y_sum, y_temp))
 
-            # Ceiling of 1.0 for each element
-            #for j in range(0, len(y_temp)):
-            #    if y_temp[j] > 1.0:
-            #        y_temp[j] = 1.0
-            y_sum_ceiling = list(map(lambda a,b: a + b, y_sum_ceiling, y_temp))
+                # Ceiling of 1.0 for each element
+                #for j in range(0, len(y_temp)):
+                #    if y_temp[j] > 1.0:
+                #        y_temp[j] = 1.0
+                y_sum_ceiling = list(map(lambda a,b: a + b, y_sum_ceiling, y_temp))
+            plot_index = plot_index + 1
     y_average = list(map(lambda a: a/n_nodes, y_sum))
     y_average_ceiling = list(map(lambda a: a/n_nodes, y_sum_ceiling))
     # Plot average
@@ -366,20 +400,24 @@ def main():
             #print(record.maxcpu)
 
     score = cluster.get_average_cpu_usage()
+    start_score = score
     print(score)
     
     start_time = time.time()
-    for i in range(0, 100000):
+    n_iterations = 2
+    for i in range(0, n_iterations):
         new_state = random_migration(cluster)
         new_state_score = new_state.get_average_cpu_usage()
         if  new_state_score > score:
             score = new_state_score
             cluster = new_state
+    #Recalculate score
+    score = cluster.get_average_cpu_usage()
     #plot_cluster_cpu_usage(cluster)
     print("Migrations performed in --- %s seconds ---" % round(time.time() - start_time,3))
-    print(cluster.get_average_cpu_usage())
+    print("Improvement from: {0} to {1}. (by {2}%)".format(start_score, score, (score-start_score)/start_score*100))
 
-    plot_cluster_cpu_usage(cluster)
+    plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
 
 if __name__ == "__main__":
     main()
