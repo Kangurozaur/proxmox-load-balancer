@@ -300,14 +300,14 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
             # Check if VM records already exist on source node
             current_vm = deepcopy(target_vm)
 
-            migration_timestamp_index = 0       # Index of record when migration occured, 0-69
+            migration_timestamp_index = len(target_vm.utilization)       # Index of record when migration occured, 0-69
             for index, utilization_record in enumerate(target_vm.utilization):
                 if utilization_record.time < migration["endtime"]:
                     # Remove utilization records from before migration
                     target_vm.utilization[index].cpu = 0
                 else:
                     migration_timestamp_index = index
-                    continue
+                    break
             for index in range(migration_timestamp_index, len(current_vm.utilization)):
                 current_vm.utilization[index].cpu = 0
             source_node.add_vm(current_vm)
@@ -452,8 +452,9 @@ def random_migration(cluster: Cluster) -> Cluster:
 def main():
     start_time = time.time()
     
-    load_method = "API"
-    timeframe = "day"
+    load_method = "FILE"
+    cf = "AVERAGE"
+    timeframe = "hour"
     save = False
     
     if load_method == "FILE":
@@ -462,12 +463,12 @@ def main():
             cluster = pickle.load(cluster_file)
     else:
         # Load from API
-        cluster = load_cluster_info(timeframe,"AVERAGE")
+        cluster = load_cluster_info(timeframe,cf)
     print("Cluster information loaded in --- %s seconds ---" % round(time.time() - start_time,3))
     
     # Save snapshot
     if save:
-        with open("snapshots/scenario2/{0}-snapshot-before-{1}".format(datetime.today().strftime("%d%m%Y%H%M%S"), timeframe), 'wb') as cluster_snapshot:
+        with open("snapshots/scenario1/{0}-snapshot-before-{1}-{2}".format(datetime.today().strftime("%d%m%Y%H%M%S"), timeframe,cf), 'wb') as cluster_snapshot:
             pickle.dump(cluster, cluster_snapshot)
 
     score = cluster.get_average_cpu_usage()
