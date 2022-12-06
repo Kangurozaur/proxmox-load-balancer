@@ -449,47 +449,135 @@ def random_migration(cluster: Cluster) -> Cluster:
     migrate(vmid, source_host, target_host)
     return cluster
 
+def load_cluster_from_file(filename):
+    with open(filename, 'rb') as cluster_file:
+        cluster = pickle.load(cluster_file)
+    return cluster
+
+def compare_cluster_states(cluster1, cluster2):
+    reference_cluster = deepcopy(cluster1)
+    simulated_cluster = deepcopy(cluster2)
+
+def trim_cluster_data(cluster, timeframe):
+    start, end = timeframe
+    for node in cluster.nodes:
+        node.utilization = node.utilization[start:end]
+        node.aggregate_utilization = node.aggregate_utilization[start:end]
+        for vm in node.vms:
+            vm.utilization = vm.utilization[start:end]
+            
+    return cluster
+
+def pearson_coefficient(data1, data2):
+
+    if len(data1) != len(data2):
+        raise Exception("Datasets must be of the same length to find corresponding points.")
+
+    # Calculate means of datasets
+    mean1 = np.mean(data1)
+    mean2 = np.mean(data2)
+
+    # Calculate standard deviations of datasets
+    std1 = np.std(data1)
+    std2 = np.std(data2)
+
+    # Calculate Pearson correlation coefficient
+    r = np.sum([(d1 - mean1) * (d2 - mean2) for d1, d2 in zip(data1, data2)]) / (len(data1) * std1 * std2)
+
+    return r
+
+def print_results(p_coefficients):
+    # Calculate number of scenarios
+    num_scenarios = len(p_coefficients) // 2
+
+    # Print header row
+    print("Scenario\tResult")
+    print("--------\t------")
+
+    # Print results for each scenario
+    for i in range(num_scenarios):
+        # Calculate average Pearson correlation coefficient for scenario
+        avg = (p_coefficients[2 * i] + p_coefficients[2 * i + 1]) / 2
+
+        # Print results for scenario
+        print("%d\t\t%.4f" % (i + 1, avg))
+
+def test_simulation():
+    simulation_timeframe = [(49,68),(42,65),(43,70)]
+    reference_timeframe = [(50,69),(44,67),(22,49)]
+
+    p_coefficients = []
+    for n_scenario in range(1,4):
+        base_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-before-hour-AVERAGE'.format(n_scenario))
+
+        expected_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-after-hour-AVERAGE'.format(n_scenario))
+
+        simulated_state = deepcopy(base_state)
+        migrate(114, simulated_state.get_node_by_name("pve-g2n6"), simulated_state.get_node_by_name("pve-g2n8"))
+
+        # Trim cluster utilization entries to period of interest
+        simulated_state = trim_cluster_data(simulated_state, simulation_timeframe[n_scenario-1])
+        expected_state = trim_cluster_data(expected_state, reference_timeframe[n_scenario-1])
+
+        _ = simulated_state.get_average_cpu_usage()
+        _ = expected_state.get_average_cpu_usage()
+        #plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
+        #plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
+
+        utilization_reference_node1 = expected_state.get_node_by_name("pve-g2n6").aggregate_utilization
+        utilization_expected_node1 = simulated_state.get_node_by_name("pve-g2n6").aggregate_utilization
+
+        utilization_reference_node2 = expected_state.get_node_by_name("pve-g2n8").aggregate_utilization
+        utilization_expected_node2 = simulated_state.get_node_by_name("pve-g2n8").aggregate_utilization
+
+        r1 = pearson_coefficient(utilization_reference_node1, utilization_expected_node1)
+        r2 = pearson_coefficient(utilization_reference_node2, utilization_expected_node2)
+
+        p_coefficients.append(r1)
+        p_coefficients.append(r2)
+
+    print_results(p_coefficients)
+
 def main():
-    start_time = time.time()
+    # start_time = time.time()
     
-    load_method = "FILE"
-    cf = "AVERAGE"
-    timeframe = "hour"
-    save = False
+    # load_method = "API"
+    # cf = "MAX"
+    # timeframe = "hour"
+    # save = True
     
-    if load_method == "FILE":
-        # Load from file
-        with open('snapshots/scenario1/29112022145310-snapshot-before-hour', 'rb') as cluster_file:
-            cluster = pickle.load(cluster_file)
-    else:
-        # Load from API
-        cluster = load_cluster_info(timeframe,cf)
-    print("Cluster information loaded in --- %s seconds ---" % round(time.time() - start_time,3))
+    # if load_method == "FILE":
+    #     # Load from file
+    #     print("load")
+    # else:
+    #     # Load from API
+    #     cluster = load_cluster_info(timeframe,cf)
+    # print("Cluster information loaded in --- %s seconds ---" % round(time.time() - start_time,3))
     
-    # Save snapshot
-    if save:
-        with open("snapshots/scenario1/{0}-snapshot-before-{1}-{2}".format(datetime.today().strftime("%d%m%Y%H%M%S"), timeframe,cf), 'wb') as cluster_snapshot:
-            pickle.dump(cluster, cluster_snapshot)
+    # # Save snapshot
+    # if save:
+    #     with open("snapshots/scenario3/{0}-snapshot-after-{1}-{2}".format(datetime.today().strftime("%d%m%Y%H%M%S"), timeframe,cf), 'wb') as cluster_snapshot:
+    #         pickle.dump(cluster, cluster_snapshot)
 
-    score = cluster.get_average_cpu_usage()
-    start_score = score
-    print(score)
+    # score = cluster.get_average_cpu_usage()
+    # start_score = score
+    # print(score)
     
-    start_time = time.time()
-    n_iterations = 0
-    plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
-    #migrate(114, cluster.get_node_by_name("pve-g2n6"), cluster.get_node_by_name("pve-g2n8"))
-    #Recalculate score
-    score = cluster.get_average_cpu_usage()
-    #plot_cluster_cpu_usage(cluster)
-    print("Migrations performed in --- %s seconds ---" % round(time.time() - start_time,3))
-    print("Improvement from: {0} to {1}. (by {2}%)".format(start_score, score, (score-start_score)/start_score*100))
+    # start_time = time.time()
+    # n_iterations = 0
+    # plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
+    # #migrate(114, cluster.get_node_by_name("pve-g2n6"), cluster.get_node_by_name("pve-g2n8"))
+    # #Recalculate score
+    # score = cluster.get_average_cpu_usage()
+    # #plot_cluster_cpu_usage(cluster)
+    # print("Migrations performed in --- %s seconds ---" % round(time.time() - start_time,3))
+    # print("Improvement from: {0} to {1}. (by {2}%)".format(start_score, score, (score-start_score)/start_score*100))
 
-    # Case 1, test cluster:
-    plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
-    # Case 2, production cluster:
-    #plot_cluster_cpu_usage(cluster)
-
+    # # Case 1, test cluster:
+    # plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
+    # # Case 2, production cluster:
+    # #plot_cluster_cpu_usage(cluster)
+    test_simulation()
     # Plot all figures
     plt.show()
 
