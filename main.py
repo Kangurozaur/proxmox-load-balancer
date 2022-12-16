@@ -318,6 +318,10 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
 
 def plot_cluster_cpu_usage(cluster: Cluster, node_names_list = []):
     
+    # Sort cluster nodes by name
+
+    cluster.nodes.sort(key=lambda a: a.name)
+
     n_nodes = len(cluster.nodes)
 
     # If node_names specified, check if node_names specified exist in cluster
@@ -380,7 +384,90 @@ def plot_cluster_cpu_usage(cluster: Cluster, node_names_list = []):
     ax[n_nodes].axhline(y = total_average, color = 'y', linestyle = '-')
     ax[n_nodes].axhline(y = 1, color = 'r', linestyle = '-')
 
-def migrate(vmid, source_host: Node, target_host: Node):
+def round_robin_scheduler(node, index, core_coef = 0.001):
+    # Initialize an empty list to store the scheduled cores for each virtual machine
+    scheduled_cores = [0 for vm in node.vms]
+
+    # Calculate the total number of virtual cores assigned to the virtual machines on the node
+    total_vm_cores = sum([vm.utilization[index].maxcpu for vm in node.vms])
+
+    node_cores = node.utilization[index].maxcpu
+    # Check if the node is overcommitted
+    if total_vm_cores > node_cores:
+        # Calculate the number of times the allocation process should repeat
+        repeat = node_cores * int(1/core_coef)
+
+        # Calculate average utilization of each VM
+        idle_constants = [min(record.cpu for record in vm.utilization) for vm in node.vms]
+        avg_util = [0 for vm in node.vms]
+        for j in range(len(node.vms)):
+            util_sum = 0.0
+            for util_record in node.vms[j].utilization:
+                util_sum += util_record.cpu
+            avg_util.append(util_sum/len(node.vms[j].utilization))
+
+        # Allocate the cores to the virtual machines in a round-robin fashion
+        for i in range(repeat):
+            for j in range(len(node.vms)):
+                old_utilization = node.vms[j].utilization[index].maxcpu * node.vms[j].utilization[index].cpu
+                next_utilization = node.vms[j].utilization[index+1].cpu * node.vms[j].utilization[index+1].maxcpu
+                # Check if the current virtual machine is allocated max number of cores
+                if scheduled_cores[j] >= node.vms[j].utilization[index].maxcpu:
+                    scheduled_cores[j] = node.vms[j].utilization[index].maxcpu
+                    continue
+                elif scheduled_cores[j] < old_utilization:
+                    scheduled_cores[j] += core_coef
+                # Check if additional cores should be allocated - this is done when a big workload is ran continuously
+                # and there is enough workload to "take" from next timestamps, until one with idle load is found
+                else:
+                    workload_left = 0
+                    for next_index in range(index, len(node.vms[j].utilization)):
+                        if node.vms[j].utilization[next_index].maxcpu * node.vms[j].utilization[next_index].cpu > idle_constants[j]*2:
+                            # VM not idle at that point
+                            # Workload left incremented, but excluding idle state
+                            workload_left += (node.vms[j].utilization[next_index].maxcpu * node.vms[j].utilization[next_index].cpu) - (idle_constants[j] * node.vms[j].utilization[next_index].maxcpu)
+                        else:
+                            break                   
+                    if workload_left - (scheduled_cores[j] - old_utilization) > idle_constants[j]:
+                        scheduled_cores[j] += core_coef
+
+    else:
+        # The node is not overcommitted, so allocate the required number of cores to each virtual machine
+        for j in range(len(node.vms)):
+            scheduled_cores[j] = node.vms[j].utilization[index].maxcpu * node.vms[j].utilization[index].cpu
+
+    # Return the scheduled cores for each virtual machine
+    return scheduled_cores, idle_constants
+
+def reschedule_node(node, overload_timestamps):
+    for time_index in overload_timestamps:
+        scheduled_cores, idle_constants = round_robin_scheduler(node, time_index, 0.001)
+        
+        # Reassign the newly scheduled cores, along with the utilization
+        for i, new_cores in enumerate(scheduled_cores):
+            old_cores = node.vms[i].utilization[time_index].cpu * node.vms[i].utilization[time_index].maxcpu
+            additional_workload = new_cores - old_cores
+            # If additional workload positive - take workload from somewhere
+            if additional_workload > 0:
+                workload_end_index = time_index
+                for next_index in range(time_index, len(node.vms[i].utilization)):
+                    if node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu < 2 * idle_constants[i]:
+                        workload_end_index = next_index
+                for next_index in reversed(range(time_index+1, workload_end_index)):
+                    if additional_workload > (idle_constants[i] * node.vms[i].utilization[next_index].maxcpu) + (node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu):
+                        additional_workload -= node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu
+                        node.vms[i].utilization[next_index].cpu = idle_constants[i]
+                    else:
+                        node.vms[i].utilization[next_index].cpu -= additional_workload / node.vms[i].utilization[next_index].maxcpu
+                        break 
+                node.vms[i].utilization[time_index].cpu = new_cores / node.vms[i].utilization[time_index].maxcpu
+            elif additional_workload < 0:
+                # If additional workload negative - delegate it further
+                node.vms[i].utilization[time_index+1].cpu -= additional_workload / node.vms[i].utilization[time_index+1].maxcpu
+                node.vms[i].utilization[time_index].cpu = new_cores / node.vms[i].utilization[time_index].maxcpu
+
+
+def migrate(vmid, source_host: Node, target_host: Node, cluster):
     # Move vm from source to host
 
     vm_index, vm = source_host.get_vm_by_vmid(vmid)
@@ -389,18 +476,38 @@ def migrate(vmid, source_host: Node, target_host: Node):
 
     # Modify utilization records accordingly 
 
-    # Normalize utilization to match target host CPUs
-    cpu_factor = target_host.utilization[0].maxcpu/source_host.utilization[0].maxcpu
-    for record in current_vm.utilization:
-        record.cpu = record.cpu * cpu_factor
-
     # Adjust cpu usage on source node
+    _ = cluster.get_average_cpu_usage()
+    # Find at what times was the source node overcommited
+    overload_timestamps = []
+    for index, record in enumerate(source_host.aggregate_utilization):
+        if record >= 0.95:
+            # It was overloaded
+            overload_timestamps.append(index)
+    # Delete the migrated VM
     del source_host.vms[vm_index]
+    # For each of these timestamps, reschedule cores
     
+    reschedule_node(source_host, overload_timestamps)
 
     # Adjust cpu usage on target node
+
     target_host.add_vm(current_vm)
-    
+
+    # Recalculate summed up utilization to see if target node gets overcommited at any point due to migration
+    _ = cluster.get_average_cpu_usage()
+
+    overload_timestamps = []
+    for index, record in enumerate(target_host.aggregate_utilization):
+        if record >= 0.95:
+            # It was overloaded
+            overload_timestamps.append(index)
+    reschedule_node(target_host, overload_timestamps)
+
+        
+
+
+ 
 def perform_migrations(cluster: Cluster):
 
     # Find time at which aggregated utilization is over 100%
@@ -446,7 +553,7 @@ def random_migration(cluster: Cluster) -> Cluster:
     vmid = source_host.vms[vm_index].id
     
     # Migrate it
-    migrate(vmid, source_host, target_host)
+    migrate(vmid, source_host, target_host, cluster)
     return cluster
 
 def load_cluster_from_file(filename):
@@ -513,11 +620,16 @@ def test_simulation():
         expected_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-after-hour-AVERAGE'.format(n_scenario))
 
         simulated_state = deepcopy(base_state)
-        migrate(114, simulated_state.get_node_by_name("pve-g2n6"), simulated_state.get_node_by_name("pve-g2n8"))
+        plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
+        migrate(114, simulated_state.get_node_by_name("pve-g2n6"), simulated_state.get_node_by_name("pve-g2n8"), simulated_state)
+
 
         # Trim cluster utilization entries to period of interest
         simulated_state = trim_cluster_data(simulated_state, simulation_timeframe[n_scenario-1])
         expected_state = trim_cluster_data(expected_state, reference_timeframe[n_scenario-1])
+
+        plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
+        plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
 
         _ = simulated_state.get_average_cpu_usage()
         _ = expected_state.get_average_cpu_usage()
