@@ -13,10 +13,12 @@ import random as rand
 import pickle
 import re
 from prometheus_api_client import PrometheusConnect
+from prometheus_api_client.utils import parse_datetime
+from datetime import timedelta
 
 class VmUsageRecord:
 
-    def __init__(self, time, disk, maxdisk, cpu, maxcpu, netin, netout, diskread, diskwrite, mem, maxmem):
+    def __init__(self, time, cpu, maxcpu, disk = 0, maxdisk = 0, netin = 0, netout = 0, diskread = 0, diskwrite = 0, mem = 0, maxmem = 0):
         self.time = time
         self.disk = disk
         self.maxdisk = maxdisk
@@ -33,7 +35,7 @@ class VmUsageRecord:
 
 class NodeUsageRecord:
 
-    def __init__(self, time, maxcpu, netout, netin, cpu, swapused, swaptotal, memtotal, memused, loadavg, iowait, rootused, roottotal):
+    def __init__(self, time, cpu, maxcpu, netout = 0, netin = 0, swapused = 0, swaptotal = 0, memtotal = 0, memused = 0, loadavg = 0, iowait = 0, rootused = 0, roottotal = 0):
         self.time = time
         self.maxcpu = maxcpu
         self.netout = netout
@@ -57,8 +59,8 @@ class VM:
         self.id = id
         self.utilization = []
 
-    def add_usage_record(record:VmUsageRecord):
-        self.utilization.add(record)
+    def add_usage_record(self, record:VmUsageRecord):
+        self.utilization.append(record)
 
     def get_utilization_by_timestamp(self, timestamp):
         for index, record in enumerate(self.utilization):
@@ -76,7 +78,7 @@ class Node:
         self.migrations = []
     
     def add_usage_record(self, record:NodeUsageRecord):
-        self.utilization.add(record)
+        self.utilization.append(record)
 
     # Add VM to a node. If it already exists, include missing usage records
     def add_vm(self, vm):
@@ -92,7 +94,7 @@ class Node:
         for index, record in enumerate(self.utilization):
             if timestamp == record.time:
                 return index, record
-        return NodeUsageRecord(timestamp,0,0,0,0,0,0,0,0,0,0,0,0)
+        return NodeUsageRecord(timestamp,0,0)
         raise Exception("There are no utilization records for {0} timestamp for node {1}".format(timestamp, self.name))
 
     def get_vm_by_vmid(self, vmid):
@@ -112,7 +114,7 @@ class Node:
                     _, current_vm_utilization_record = vm.get_utilization_by_timestamp(self.utilization[i].time)
                     # Include number of cores in calculation
                     cpu_utilization_sum += (current_vm_utilization_record.cpu * current_vm_utilization_record.maxcpu/self.utilization[i].maxcpu)
-                except:
+                except Exception as e:
                     pass                
             aggregate_utilization.append(cpu_utilization_sum)
         self.aggregate_utilization = aggregate_utilization
@@ -133,7 +135,7 @@ class Node:
                 sum += self.aggregate_utilization[i*n_aggregate + j]
             
             #print(datetime.fromtimestamp( time_sum/n_aggregate ))
-            xpoints.append(mdate.epoch2num(time_sum/n_aggregate))
+            xpoints.append(mdate.date2num(datetime.utcfromtimestamp((time_sum/n_aggregate))))
 
             ypoints.append(sum/n_aggregate)
 
@@ -254,19 +256,7 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
                         print("Data entry doesn't fit the schema for:\n{0}\nAdding empty usage.".format(vm["name"]))
                         for key in data_entry.keys():
                             print("\t{0}: {1}".format(key,data_entry[key]))
-                        current_vm.utilization.append(VmUsageRecord(
-                            data_entry["time"],
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0
-                        ))
+                        current_vm.utilization.append(VmUsageRecord(data_entry["time"], 0, 0))
                 # Add VM to corresponding node
                 current_node.vms.append(current_vm)
 
@@ -312,8 +302,74 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
                 current_vm.utilization[index].cpu = 0
             source_node.add_vm(current_vm)
                   
-    elif config.method == "prometheus":
-        prom = PrometheusConnect(url ="<prometheus-host>", disable_ssl=True)
+    elif config["method"] == "prometheus":
+        prom = PrometheusConnect(url=config["connection"]["prometheus"]["url"], disable_ssl=True)
+        
+        start_time = parse_datetime("7d")
+        end_time = parse_datetime("now")
+        chunk_size = 60.0
+
+        cpu_usage_data = prom.custom_query_range(
+            '(pve_cpu_usage_ratio * on(id, instance) group_left(name, type, node) pve_guest_info{instance = "10.71.172.10", type = "qemu"}) and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
+        cpu_max_data = prom.custom_query_range(
+            '(pve_cpu_usage_limit * on(id, instance) group_left(name, type,node) pve_guest_info{instance = "10.71.172.10", type = "qemu"}) and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
+        nodes_cpu_max_data = prom.custom_query_range(
+            'pve_cpu_usage_limit{instance = "10.71.172.10", id =~"node/.*"} and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
+        nodes_cpu_usage_data = prom.custom_query_range(
+            '(pve_cpu_usage_ratio * on(id, instance) pve_cpu_usage_limit{instance = "10.71.172.10", id=~"node.*"}) and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
+        # Add all nodes
+
+        for i in range(0, len(nodes_cpu_max_data)):
+
+            current_node = Node(nodes_cpu_max_data[i]["metric"]["id"].split("/")[1])
+            
+            for node_series_index, node_series in enumerate(nodes_cpu_usage_data):
+                if node_series["metric"]["id"].split("/")[1] == current_node.name:
+                    for series_index, cpu_usage_series in enumerate(node_series["values"]):
+                        current_usage_record = NodeUsageRecord(time=cpu_usage_series[0], cpu=float(cpu_usage_series[1]), maxcpu=int(nodes_cpu_max_data[node_series_index]["values"][series_index][1]))
+                        current_node.add_usage_record(current_usage_record)
+                    break
+            cluster.nodes.append(current_node)
+
+        for entry_index, cpu_data_entry in enumerate(cpu_usage_data):
+
+            current_node = cluster.get_node_by_name(cpu_data_entry["metric"]["node"])
+
+            vm_id = cpu_data_entry["metric"]["id"].split("/")[1]
+            
+            current_vm = None
+            try:
+                current_vm = current_node.get_vm_by_vmid(vm_id)
+            except:
+                current_vm = VM(vm_id)
+                current_node.add_vm(current_vm)
+            
+            for series_index, series in enumerate(cpu_data_entry["values"]):
+                current_usage_record = VmUsageRecord(time=series[0], cpu=float(series[1]), maxcpu=int(cpu_max_data[entry_index]["values"][series_index][1]))
+                current_vm.add_usage_record(current_usage_record)
+            
+        _ = cluster.get_average_cpu_usage()
+
     return cluster
 
 def plot_cluster_cpu_usage(cluster: Cluster, node_names_list = []):
@@ -342,25 +398,15 @@ def plot_cluster_cpu_usage(cluster: Cluster, node_names_list = []):
     plot_index = 0
     for i in range(0, len(cluster.nodes)):
         if node_names_list == [] or cluster.nodes[i].name in node_names_list:
-            cluster.nodes[i].calculate_aggregate_utilization()
             # Calculate aggregated CPU utilization
             if plot_index == 0:
                 (xpoints,y_sum) = cluster.nodes[i].plot(fig, ax[plot_index], 1)
                 
                 y_temp = deepcopy(y_sum)
-                # Ceiling of 1.0 for each element
-                #for j in range(0, len(y_temp)):
-                #    if y_temp[j] > 1.0:
-                #        y_temp[j] = 1.0
                 y_sum_ceiling = y_temp
             else:
                 (_ ,y_temp) = cluster.nodes[i].plot(fig, ax[plot_index], 1)
                 y_sum = list(map(lambda a,b: a + b, y_sum, y_temp))
-
-                # Ceiling of 1.0 for each element
-                #for j in range(0, len(y_temp)):
-                #    if y_temp[j] > 1.0:
-                #        y_temp[j] = 1.0
                 y_sum_ceiling = list(map(lambda a,b: a + b, y_sum_ceiling, y_temp))
             plot_index = plot_index + 1
     y_average = list(map(lambda a: a/n_nodes, y_sum))
@@ -448,8 +494,6 @@ def reschedule_node(node, overload_timestamps, vm_id = None, idle_threshold = 10
         
         # Reassign the newly scheduled cores for each VM, along with the utilization
         for i, new_cores in enumerate(scheduled_cores):
-            if (vm_id != None and i == 4):
-                print("dupa")
             old_cores = node.vms[i].utilization[time_index].cpu * node.vms[i].utilization[time_index].maxcpu
             additional_workload = new_cores - old_cores
             # If additional workload positive - take workload from somewhere
@@ -572,6 +616,10 @@ def load_cluster_from_file(filename):
         cluster = pickle.load(cluster_file)
     return cluster
 
+def save_cluster_to_file(cluster, filename):
+    with open(filename, 'wb') as cluster_snapshot:
+        pickle.dump(cluster, cluster_snapshot)
+
 def compare_cluster_states(cluster1, cluster2):
     reference_cluster = deepcopy(cluster1)
     simulated_cluster = deepcopy(cluster2)
@@ -635,21 +683,14 @@ def test_simulation():
         # Trim cluster utilization entries to period of interest
         simulated_state = trim_cluster_data(simulated_state, simulation_timeframe[n_scenario-1])
         expected_state = trim_cluster_data(expected_state, reference_timeframe[n_scenario-1])
-        plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
+
         migrate(114, simulated_state.get_node_by_name("pve-g2n6"), simulated_state.get_node_by_name("pve-g2n8"), simulated_state)
-
-
-        # Trim cluster utilization entries to period of interest
-        #simulated_state = trim_cluster_data(simulated_state, simulation_timeframe[n_scenario-1])
-        #expected_state = trim_cluster_data(expected_state, reference_timeframe[n_scenario-1])
 
         plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
         plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
 
         _ = simulated_state.get_average_cpu_usage()
         _ = expected_state.get_average_cpu_usage()
-        #plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
-        #plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
 
         utilization_reference_node1 = expected_state.get_node_by_name("pve-g2n6").aggregate_utilization
         utilization_expected_node1 = simulated_state.get_node_by_name("pve-g2n6").aggregate_utilization
@@ -666,45 +707,19 @@ def test_simulation():
     print_results(p_coefficients)
 
 def main():
-    # start_time = time.time()
-    
-    # load_method = "API"
-    # cf = "MAX"
-    # timeframe = "hour"
-    # save = True
-    
-    # if load_method == "FILE":
-    #     # Load from file
-    #     print("load")
-    # else:
-    #     # Load from API
-    #     cluster = load_cluster_info(timeframe,cf)
-    # print("Cluster information loaded in --- %s seconds ---" % round(time.time() - start_time,3))
-    
-    # # Save snapshot
-    # if save:
-    #     with open("snapshots/scenario3/{0}-snapshot-after-{1}-{2}".format(datetime.today().strftime("%d%m%Y%H%M%S"), timeframe,cf), 'wb') as cluster_snapshot:
-    #         pickle.dump(cluster, cluster_snapshot)
 
-    # score = cluster.get_average_cpu_usage()
-    # start_score = score
-    # print(score)
-    
-    # start_time = time.time()
-    # n_iterations = 0
-    # plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
-    # #migrate(114, cluster.get_node_by_name("pve-g2n6"), cluster.get_node_by_name("pve-g2n8"))
-    # #Recalculate score
-    # score = cluster.get_average_cpu_usage()
-    # #plot_cluster_cpu_usage(cluster)
-    # print("Migrations performed in --- %s seconds ---" % round(time.time() - start_time,3))
-    # print("Improvement from: {0} to {1}. (by {2}%)".format(start_score, score, (score-start_score)/start_score*100))
+    #test_simulation()
 
-    # # Case 1, test cluster:
-    # plot_cluster_cpu_usage(cluster, ["pve-g2n6", "pve-g2n8"])
-    # # Case 2, production cluster:
-    # #plot_cluster_cpu_usage(cluster)
-    test_simulation()
+    start_time = time.time()
+    #cluster = load_cluster_info("week", "average")
+    cluster = load_cluster_from_file("snapshots/data_week")
+    
+    #_ = cluster.get_average_cpu_usage()
+    plot_cluster_cpu_usage(cluster)
+
+    print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
+
+
     # Plot all figures
     plt.show()
 
