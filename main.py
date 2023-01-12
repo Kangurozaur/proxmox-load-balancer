@@ -111,7 +111,10 @@ class Node:
             cpu_utilization_sum = 0
             for vm in self.vms:
                 try:
-                    _, current_vm_utilization_record = vm.get_utilization_by_timestamp(self.utilization[i].time)
+                    if vm.utilization[i].time != self.utilization[i].time:
+                        _, current_vm_utilization_record = vm.get_utilization_by_timestamp(self.utilization[i].time)
+                    else:
+                        current_vm_utilization_record = vm.utilization[i]
                     # Include number of cores in calculation
                     cpu_utilization_sum += (current_vm_utilization_record.cpu * current_vm_utilization_record.maxcpu/self.utilization[i].maxcpu)
                 except Exception as e:
@@ -437,7 +440,7 @@ def round_robin_scheduler(node, index, core_coef = 0.001, vm_id = None):
     # Calculate the total number of virtual cores assigned to the virtual machines on the node
     total_vm_cores = sum([vm.utilization[index].maxcpu for vm in node.vms])
 
-    idle_constants = [min(record.cpu for record in vm.utilization) for vm in node.vms]
+    idle_constants = [0.05 for vm in node.vms]
 
     node_cores = node.utilization[index].maxcpu
     # Check if the node is overcommitted
@@ -468,7 +471,7 @@ def round_robin_scheduler(node, index, core_coef = 0.001, vm_id = None):
                 elif vm_id == None or node.vms[j].id == vm_id:
                     workload_left = 0
                     for next_index in range(index, len(node.vms[j].utilization)):
-                        if node.vms[j].utilization[next_index].cpu > idle_constants[j]*2:
+                        if node.vms[j].utilization[next_index].cpu > idle_constants[j]:
                             # VM not idle at that point
                             # Workload left incremented, but excluding idle state
                             workload_left += (node.vms[j].utilization[next_index].maxcpu * node.vms[j].utilization[next_index].cpu) - (idle_constants[j] * node.vms[j].utilization[next_index].maxcpu)
@@ -488,8 +491,11 @@ def round_robin_scheduler(node, index, core_coef = 0.001, vm_id = None):
 
 # Function that does ...
 # vm_id - id of migrated vm; if the rescheduling is done on a target node after migration and target node is not overcommited or None otherwise
-def reschedule_node(node, overload_timestamps, vm_id = None, idle_threshold = 100):
-    for time_index in overload_timestamps:
+def reschedule_node(node, overload_timestamps, vm_id = None):
+    
+    j = 0
+    while j < len(overload_timestamps):
+        time_index = overload_timestamps[j]
         scheduled_cores, idle_constants = round_robin_scheduler(node, time_index, 0.01, vm_id)
         
         # Reassign the newly scheduled cores for each VM, along with the utilization
@@ -497,15 +503,19 @@ def reschedule_node(node, overload_timestamps, vm_id = None, idle_threshold = 10
             old_cores = node.vms[i].utilization[time_index].cpu * node.vms[i].utilization[time_index].maxcpu
             additional_workload = new_cores - old_cores
             # If additional workload positive - take workload from somewhere
-            if additional_workload > 0:
+            if additional_workload > 0.01:
                 # Find where the current workload ends
                 workload_end_index = len(node.vms[i].utilization) - 1
                 for next_index in range(time_index, len(node.vms[i].utilization)):
-                    if node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu < idle_threshold * idle_constants[i]:
+                    if node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu <= idle_constants[i]:
                         workload_end_index = next_index
+                        break
                 for next_index in reversed(range(time_index+1, workload_end_index)):
-                    if additional_workload > (idle_constants[i] * node.vms[i].utilization[next_index].maxcpu) + (node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu):
-                        additional_workload -= node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu
+                    available_workload = node.vms[i].utilization[next_index].cpu * node.vms[i].utilization[next_index].maxcpu - idle_constants[i] * node.vms[i].utilization[next_index].maxcpu
+                    if available_workload < 0:
+                        continue
+                    if additional_workload > available_workload:
+                        additional_workload -= available_workload
                         node.vms[i].utilization[next_index].cpu = idle_constants[i]
                     else:
                         node.vms[i].utilization[next_index].cpu -= additional_workload / node.vms[i].utilization[next_index].maxcpu
@@ -515,6 +525,10 @@ def reschedule_node(node, overload_timestamps, vm_id = None, idle_threshold = 10
                 # If additional workload negative - delegate it further
                 node.vms[i].utilization[time_index+1].cpu -= additional_workload / node.vms[i].utilization[time_index+1].maxcpu
                 node.vms[i].utilization[time_index].cpu = new_cores / node.vms[i].utilization[time_index].maxcpu
+                # Add next timestamp for rescheduling if its not there already
+                if j != len(overload_timestamps)-1 and overload_timestamps[j+1] != time_index + 1:
+                    overload_timestamps.insert(j+1, time_index+1)
+        j += 1
 
 def get_overload_timestamps(node, overload_threshold = 0.95):
     # Find at what times was the source node overcommited
@@ -534,8 +548,6 @@ def migrate(vmid, source_host: Node, target_host: Node, cluster, max_depth = 100
 
     # Modify utilization records accordingly 
 
-    # Adjust cpu usage on source node
-    _ = cluster.get_average_cpu_usage()
 
     overload_timestamps = get_overload_timestamps(source_host, 0.95)
     # Delete the migrated VM
@@ -577,15 +589,15 @@ def migrate(vmid, source_host: Node, target_host: Node, cluster, max_depth = 100
     target_host.calculate_aggregate_utilization()
     
     # Repeat until all overload cases solved or depth exceeded
-    counter = 0
-    while True and counter < max_depth:
-        temp_overload_timestamps = get_overload_timestamps(target_host, 1.0)
-        if (len(temp_overload_timestamps) == 0):
-            break
-        else:
-            reschedule_node(target_host, temp_overload_timestamps)
-            target_host.calculate_aggregate_utilization()
-            counter += 1
+    # counter = 0
+    # while True and counter < max_depth:
+    #     temp_overload_timestamps = get_overload_timestamps(target_host, 1.0)
+    #     if (len(temp_overload_timestamps) == 0):
+    #         break
+    #     else:
+    #         reschedule_node(target_host, temp_overload_timestamps)
+    #         target_host.calculate_aggregate_utilization()
+    #         counter += 1
 
                 
 def random_migration(cluster: Cluster) -> Cluster:
@@ -673,7 +685,7 @@ def test_simulation():
     reference_timeframe = [(50,69),(44,67),(22,49)]
 
     p_coefficients = []
-    for n_scenario in range(1,4):
+    for n_scenario in range(3,4):
         base_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-before-hour-AVERAGE'.format(n_scenario))
 
         expected_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-after-hour-AVERAGE'.format(n_scenario))
@@ -684,13 +696,15 @@ def test_simulation():
         simulated_state = trim_cluster_data(simulated_state, simulation_timeframe[n_scenario-1])
         expected_state = trim_cluster_data(expected_state, reference_timeframe[n_scenario-1])
 
-        migrate(114, simulated_state.get_node_by_name("pve-g2n6"), simulated_state.get_node_by_name("pve-g2n8"), simulated_state)
+        _ = simulated_state.get_average_cpu_usage()
 
-        plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
-        plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
+        migrate(114, simulated_state.get_node_by_name("pve-g2n6"), simulated_state.get_node_by_name("pve-g2n8"), simulated_state)
 
         _ = simulated_state.get_average_cpu_usage()
         _ = expected_state.get_average_cpu_usage()
+
+        plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
+        plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
 
         utilization_reference_node1 = expected_state.get_node_by_name("pve-g2n6").aggregate_utilization
         utilization_expected_node1 = simulated_state.get_node_by_name("pve-g2n6").aggregate_utilization
@@ -706,20 +720,49 @@ def test_simulation():
 
     print_results(p_coefficients)
 
+def find_migrations(cluster: Cluster):
+    # Declare constants
+    utilization_threshold = 0.95
+
+    # Find timestamps when any of the nodes were overloaded
+    overload_timestamps = []
+    for node in cluster.nodes:
+        node_overload_timestamps = {}
+        
+        for index, utilization in enumerate(node.aggregate_utilization):
+            if utilization > utilization_threshold:
+                max_util = 0.0
+                victim = None
+                for vm in node.vms:
+                    if vm.utilization[index].cpu > max_util:
+                        max_util = vm.utilization[index].cpu
+                        victim = vm
+                node_overload_timestamps[str(index)] = victim
+        print("Node {0} was overloaded on timestamps:".format(node.name))
+        for key in node_overload_timestamps.keys():
+            print("Timestamp: {0}, victim id: {1}, usage(%): {2}".format(key, node_overload_timestamps[key].id , (node_overload_timestamps[key].utilization[int(key)].cpu*node_overload_timestamps[key].utilization[int(key)].maxcpu)/node.utilization[int(key)].maxcpu))
+        overload_timestamps.append(node_overload_timestamps)
+    
+
+
 def main():
 
     #test_simulation()
 
     start_time = time.time()
     #cluster = load_cluster_info("week", "average")
-    cluster = load_cluster_from_file("snapshots/data_week")
+    #cluster = load_cluster_from_file("snapshots/data_week")
     
+    test_simulation()
     #_ = cluster.get_average_cpu_usage()
-    plot_cluster_cpu_usage(cluster)
+    #plot_cluster_cpu_usage(cluster)
 
-    print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
+    #find_migrations(cluster)
 
+    #new_cluster = migrate(161, cluster.nodes[0], cluster.nodes[1], cluster, 10)
+    #print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
 
+    #plot_cluster_cpu_usage(new_cluster)
     # Plot all figures
     plt.show()
 
