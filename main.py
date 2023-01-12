@@ -67,6 +67,12 @@ class VM:
             if record.time == timestamp:
                 return index, record
         raise Exception("There are no utilization records for {0} timestamp for vm {1}".format(timestamp, self.id))
+    
+    def get_cpu_utilization_list(self):
+        result = []
+        for record in self.utilization:
+            result.append(record.cpu)
+        return result
 
 class Node:
 
@@ -101,7 +107,7 @@ class Node:
         for index, vm in enumerate(self.vms):
             if str(vm.id) == str(vmid):
                 return index, vm
-        raise Exception("There are is no vm with id {0} on {1} node".format(vmid, self.name))
+        raise Exception("There is no vm with id {0} on {1} node".format(vmid, self.name))
 
 
     # Recalculates aggregate cpu utilization of all vms
@@ -175,6 +181,15 @@ class Cluster:
                     total_sum += record
         return total_sum/(len(self.nodes[0].aggregate_utilization * len(self.nodes)))
     
+    def get_cluster_score(self, threshold = 0.0):
+        total_sum = 0
+        n = 0
+        for i in range(0, len(self.nodes)):
+            for record in self.nodes[i].aggregate_utilization:
+                    if record >= threshold:
+                        total_sum += record
+                        n += 1
+        return total_sum/n
     def get_node_by_name(self, name):
         for node in self.nodes:
             if node.name == name:
@@ -471,13 +486,13 @@ def round_robin_scheduler(node, index, core_coef = 0.001, vm_id = None):
                 elif vm_id == None or node.vms[j].id == vm_id:
                     workload_left = 0
                     for next_index in range(index, len(node.vms[j].utilization)):
-                        if node.vms[j].utilization[next_index].cpu > idle_constants[j]:
+                        if node.vms[j].utilization[next_index].cpu > 2*idle_constants[j]:
                             # VM not idle at that point
                             # Workload left incremented, but excluding idle state
                             workload_left += (node.vms[j].utilization[next_index].maxcpu * node.vms[j].utilization[next_index].cpu) - (idle_constants[j] * node.vms[j].utilization[next_index].maxcpu)
                         else:
                             break                   
-                    if workload_left - (scheduled_cores[j] - old_utilization) > idle_constants[j]:
+                    if workload_left - (scheduled_cores[j] - old_utilization) > 0:
                         scheduled_cores[j] += core_coef
                         repeat -= 1
                         was_core_assigned = True
@@ -526,7 +541,7 @@ def reschedule_node(node, overload_timestamps, vm_id = None):
                 node.vms[i].utilization[time_index+1].cpu -= additional_workload / node.vms[i].utilization[time_index+1].maxcpu
                 node.vms[i].utilization[time_index].cpu = new_cores / node.vms[i].utilization[time_index].maxcpu
                 # Add next timestamp for rescheduling if its not there already
-                if j != len(overload_timestamps)-1 and overload_timestamps[j+1] != time_index + 1:
+                if j == len(overload_timestamps) - 1 or overload_timestamps[j+1] != time_index + 1:
                     overload_timestamps.insert(j+1, time_index+1)
         j += 1
 
@@ -623,7 +638,7 @@ def random_migration(cluster: Cluster) -> Cluster:
     migrate(vmid, source_host, target_host, cluster)
     return cluster
 
-def load_cluster_from_file(filename):
+def load_cluster_from_file(filename) -> Cluster:
     with open(filename, 'rb') as cluster_file:
         cluster = pickle.load(cluster_file)
     return cluster
@@ -664,7 +679,7 @@ def pearson_coefficient(data1, data2):
 
     return r
 
-def print_results(p_coefficients):
+def print_testing_results(p_coefficients):
     # Calculate number of scenarios
     num_scenarios = len(p_coefficients) // 2
 
@@ -685,7 +700,7 @@ def test_simulation():
     reference_timeframe = [(50,69),(44,67),(22,49)]
 
     p_coefficients = []
-    for n_scenario in range(3,4):
+    for n_scenario in range(1,4):
         base_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-before-hour-AVERAGE'.format(n_scenario))
 
         expected_state = load_cluster_from_file('snapshots/scenario{0}/snapshot-after-hour-AVERAGE'.format(n_scenario))
@@ -706,19 +721,32 @@ def test_simulation():
         plot_cluster_cpu_usage(simulated_state, ["pve-g2n6", "pve-g2n8"])
         plot_cluster_cpu_usage(expected_state, ["pve-g2n6", "pve-g2n8"])
 
-        utilization_reference_node1 = expected_state.get_node_by_name("pve-g2n6").aggregate_utilization
-        utilization_expected_node1 = simulated_state.get_node_by_name("pve-g2n6").aggregate_utilization
+        utilization_reference_node1 = expected_state.get_node_by_name("pve-g2n6")
+        utilization_expected_node1 = simulated_state.get_node_by_name("pve-g2n6")
 
-        utilization_reference_node2 = expected_state.get_node_by_name("pve-g2n8").aggregate_utilization
-        utilization_expected_node2 = simulated_state.get_node_by_name("pve-g2n8").aggregate_utilization
+        utilization_reference_node2 = expected_state.get_node_by_name("pve-g2n8")
+        utilization_expected_node2 = simulated_state.get_node_by_name("pve-g2n8")
 
-        r1 = pearson_coefficient(utilization_reference_node1, utilization_expected_node1)
-        r2 = pearson_coefficient(utilization_reference_node2, utilization_expected_node2)
+        # Calculate correlation for each corresponding VM
+        # n_vms = 0
+        # p_coeff_sum = 0.0
+        # for vm in utilization_reference_node1.vms:
+        #     try:
+        #         _, expected_vm = utilization_expected_node1.get_vm_by_vmid(vm.id)
+        #         p_coeff_sum += pearson_coefficient(vm.get_cpu_utilization_list(), expected_vm.get_cpu_utilization_list())
+        #         n_vms += 1
+        #     except:
+        #         pass
+
+        # score = p_coeff_sum/n_vms
+
+        r1 = pearson_coefficient(utilization_reference_node1.aggregate_utilization, utilization_expected_node1.aggregate_utilization)
+        r2 = pearson_coefficient(utilization_reference_node2.aggregate_utilization, utilization_expected_node2.aggregate_utilization)
 
         p_coefficients.append(r1)
         p_coefficients.append(r2)
 
-    print_results(p_coefficients)
+    print_testing_results(p_coefficients)
 
 def find_migrations(cluster: Cluster):
     # Declare constants
@@ -751,18 +779,22 @@ def main():
 
     start_time = time.time()
     #cluster = load_cluster_info("week", "average")
-    #cluster = load_cluster_from_file("snapshots/data_week")
+    cluster = load_cluster_from_file("snapshots/data_week")
     
     test_simulation()
     #_ = cluster.get_average_cpu_usage()
-    #plot_cluster_cpu_usage(cluster)
+    plot_cluster_cpu_usage(cluster)
+
+    print(cluster.get_cluster_score(0.10))
 
     #find_migrations(cluster)
 
-    #new_cluster = migrate(161, cluster.nodes[0], cluster.nodes[1], cluster, 10)
-    #print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
+    migrate(161, cluster.nodes[0], cluster.nodes[1], cluster, 10)
+    print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
 
-    #plot_cluster_cpu_usage(new_cluster)
+    plot_cluster_cpu_usage(cluster)
+
+    print(cluster.get_cluster_score(0.10))
     # Plot all figures
     plt.show()
 
