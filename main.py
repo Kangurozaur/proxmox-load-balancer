@@ -181,15 +181,18 @@ class Cluster:
                     total_sum += record
         return total_sum/(len(self.nodes[0].aggregate_utilization * len(self.nodes)))
     
-    def get_cluster_score(self, threshold = 0.0):
+    def get_cluster_score(self, threshold = 0.0, sla_threshold = 0.95):
         total_sum = 0
         n = 0
+        sla_n = 0
         for i in range(0, len(self.nodes)):
             for record in self.nodes[i].aggregate_utilization:
                     if record >= threshold:
                         total_sum += record
                         n += 1
-        return total_sum/n
+                    if record >= sla_threshold:
+                        sla_n += 1
+        return (total_sum/n, sla_n)
     def get_node_by_name(self, name):
         for node in self.nodes:
             if node.name == name:
@@ -748,30 +751,95 @@ def test_simulation():
 
     print_testing_results(p_coefficients)
 
-def find_migrations(cluster: Cluster):
-    # Declare constants
-    utilization_threshold = 0.95
+def find_migrations(cluster:Cluster):
+    migration_dict = {}
+    for time_index in range(0, len(cluster.nodes[0].aggregate_utilization)):
+        migrations = mm_policy(cluster.nodes, time_index)
+        for host_index, migration_list in enumerate(migrations):
+            for migration in migration_list:
+                _, existing_count = migration_dict.get(migration, (0, 0))
+                migration_dict[migration] = (host_index, existing_count + 1)
+    return migration_dict
 
-    # Find timestamps when any of the nodes were overloaded
-    overload_timestamps = []
-    for node in cluster.nodes:
-        node_overload_timestamps = {}
-        
-        for index, utilization in enumerate(node.aggregate_utilization):
-            if utilization > utilization_threshold:
-                max_util = 0.0
-                victim = None
-                for vm in node.vms:
-                    if vm.utilization[index].cpu > max_util:
-                        max_util = vm.utilization[index].cpu
-                        victim = vm
-                node_overload_timestamps[str(index)] = victim
-        print("Node {0} was overloaded on timestamps:".format(node.name))
-        for key in node_overload_timestamps.keys():
-            print("Timestamp: {0}, victim id: {1}, usage(%): {2}".format(key, node_overload_timestamps[key].id , (node_overload_timestamps[key].utilization[int(key)].cpu*node_overload_timestamps[key].utilization[int(key)].maxcpu)/node.utilization[int(key)].maxcpu))
-        overload_timestamps.append(node_overload_timestamps)
+def mm_policy(host_list, time_index):
     
+    THRESH_UP = 0.93
+    migration_list = [[] for x in range(len(host_list))]
 
+    # MM algorithm
+    for host_index, host in enumerate(host_list):
+        vm_list = []
+        # Prepare vm list
+        for vm in host.vms:
+            vm_list.append((vm.id, vm.utilization[time_index].cpu * vm.utilization[time_index].maxcpu))
+        
+        vm_list.sort(key=lambda a: a[1], reverse = True)
+
+        h_max_cpu = host.utilization[time_index].maxcpu
+        h_util = host.aggregate_utilization[time_index] * h_max_cpu 
+        thresh_up_cores = THRESH_UP * h_max_cpu
+        best_fit_util = 100
+        best_fit_vm = None
+        while h_util > thresh_up_cores:
+            # SLA violation occurs
+            for vm_index, (vm_id, vm_util) in enumerate(vm_list):
+                if vm_util > h_util - thresh_up_cores:
+                    t = vm_util - h_util + thresh_up_cores
+                    if t < best_fit_util:
+                        best_fit_vm = vm_index
+                else:
+                    if best_fit_util == 100:
+                        best_fit_vm = vm_index
+                    break
+            vm_id, best_fit_util = vm_list[best_fit_vm]
+            h_util -= best_fit_util
+            migration_list[host_index].append(vm_id)
+            del(vm_list[best_fit_vm])
+            best_fit_util = 100
+            best_fit_vm = None
+    return migration_list
+
+def balance_cluster(cluster):
+    performed_migrations = []
+    for i in range(0, 55):
+        migrations = find_migrations(cluster)
+        _, old_score = cluster.get_cluster_score(0.0)
+        
+        # Pick migration to perform and try out all scenarios
+        current_migration = None
+        selection = rand.randint(0, len(migrations)-1)
+        for j, key in enumerate(migrations.keys()):
+            if (j == selection):
+                current_migration = (key, migrations[key])
+            # if j == 0:
+            #     current_migration = (key, migrations[key])
+            # else:
+            #     if migrations[key][1] > current_migration[1][1]:
+            #         current_migration = (key, migrations[key])
+        # Perform the current migration for each potential target node
+        scores = [(100, 100) for x in range(0, len(cluster.nodes))]
+        clusters = []
+        for j in range(0, len(cluster.nodes)):
+            new_cluster = None
+            if j != current_migration[1][0]:
+                new_cluster = deepcopy(cluster)
+                migrate(current_migration[0], new_cluster.nodes[current_migration[1][0]], new_cluster.nodes[j], new_cluster)
+                scores[j] = new_cluster.get_cluster_score(0.0)
+            clusters.append(new_cluster)
+        # Select the best migration
+        max_score = old_score
+        best_cluster = cluster
+        for index, (_, score) in enumerate(scores):
+            if score < max_score:
+                max_score = score
+                best_cluster = clusters[index]
+                performed_migrations.append({"vm_id":current_migration[0], "source_node": clusters[index].nodes[current_migration[1][0]].name, "target_node": clusters[index].nodes[index].name})
+        cluster = deepcopy(best_cluster)
+        del(clusters)
+        print(scores)
+        print("Iteration: {0} Score increase: {1}%".format(i, round((max_score-old_score)/old_score * 100, 2)))
+        print(performed_migrations)
+    return cluster
 
 def main():
 
@@ -781,15 +849,19 @@ def main():
     #cluster = load_cluster_info("week", "average")
     cluster = load_cluster_from_file("snapshots/data_week")
     
-    test_simulation()
+    #test_simulation()
     #_ = cluster.get_average_cpu_usage()
     plot_cluster_cpu_usage(cluster)
 
+    old_score = cluster.get_cluster_score(0.10)
+    print(old_score)
+
+    cluster = balance_cluster(cluster)
+
     print(cluster.get_cluster_score(0.10))
 
-    #find_migrations(cluster)
 
-    migrate(161, cluster.nodes[0], cluster.nodes[1], cluster, 10)
+    #migrate(161, cluster.nodes[0], cluster.nodes[1], cluster, 10)
     print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
 
     plot_cluster_cpu_usage(cluster)
