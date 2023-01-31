@@ -181,7 +181,7 @@ class Cluster:
                     total_sum += record
         return total_sum/(len(self.nodes[0].aggregate_utilization * len(self.nodes)))
     
-    def get_cluster_score(self, threshold = 0.0, sla_threshold = 0.95):
+    def get_cluster_score(self, threshold = 0.0, sla_threshold = 0.85):
         total_sum = 0
         n = 0
         sla_n = 0
@@ -514,7 +514,7 @@ def reschedule_node(node, overload_timestamps, vm_id = None):
     j = 0
     while j < len(overload_timestamps):
         time_index = overload_timestamps[j]
-        scheduled_cores, idle_constants = round_robin_scheduler(node, time_index, 0.01, vm_id)
+        scheduled_cores, idle_constants = round_robin_scheduler(node, time_index, 0.5, vm_id)
         
         # Reassign the newly scheduled cores for each VM, along with the utilization
         for i, new_cores in enumerate(scheduled_cores):
@@ -697,9 +697,10 @@ def print_testing_results(p_coefficients):
 
         # Print results for scenario
         print("%d\t\t%.4f" % (i + 1, avg))
+    print("Total avg accuracy: {0}".format(np.average(p_coefficients)))
 
 def test_simulation():
-    simulation_timeframe = [(49,68),(42,65),(43,70)]
+    simulation_timeframe = [(48,67),(42,65),(43,70)]
     reference_timeframe = [(50,69),(44,67),(22,49)]
 
     p_coefficients = []
@@ -748,7 +749,7 @@ def test_simulation():
 
         p_coefficients.append(r1)
         p_coefficients.append(r2)
-
+    
     print_testing_results(p_coefficients)
 
 def find_migrations(cluster:Cluster):
@@ -763,7 +764,7 @@ def find_migrations(cluster:Cluster):
 
 def mm_policy(host_list, time_index):
     
-    THRESH_UP = 0.93
+    THRESH_UP = 0.85
     migration_list = [[] for x in range(len(host_list))]
 
     # MM algorithm
@@ -808,65 +809,84 @@ def balance_cluster(cluster):
         # Pick migration to perform and try out all scenarios
         current_migration = None
         selection = rand.randint(0, len(migrations)-1)
-        for j, key in enumerate(migrations.keys()):
-            if (j == selection):
-                current_migration = (key, migrations[key])
-            # if j == 0:
+        allocations = []
+        migrationsList = [(k, v) for k, v in migrations.items()]
+        migrationsList.sort(key=lambda a: a[1][1], reverse=True)
+        # for j, key in enumerate(migrations.keys()):
+        for j in range(0, 10):
+            key = migrationsList[j][0]
+            # if (j == selection):
             #     current_migration = (key, migrations[key])
+            # if j == 0:
+            current_migration = (key, migrations[key])
             # else:
             #     if migrations[key][1] > current_migration[1][1]:
             #         current_migration = (key, migrations[key])
-        # Perform the current migration for each potential target node
-        scores = [(100, 100) for x in range(0, len(cluster.nodes))]
-        clusters = []
-        for j in range(0, len(cluster.nodes)):
-            new_cluster = None
-            if j != current_migration[1][0]:
-                new_cluster = deepcopy(cluster)
-                migrate(current_migration[0], new_cluster.nodes[current_migration[1][0]], new_cluster.nodes[j], new_cluster)
-                scores[j] = new_cluster.get_cluster_score(0.0)
-            clusters.append(new_cluster)
-        # Select the best migration
+        
+        
+        
+            # Perform the current migration for each potential target node
+            scores = [(100, 100) for x in range(0, len(cluster.nodes))]
+            clusters = []
+            for j in range(0, len(cluster.nodes)):
+                new_cluster = None
+                if j != current_migration[1][0]:
+                    new_cluster = deepcopy(cluster)
+                    migrate(current_migration[0], new_cluster.nodes[current_migration[1][0]], new_cluster.nodes[j], new_cluster)
+                    scores[j] = new_cluster.get_cluster_score(0.0)
+                clusters.append(new_cluster)
+            # Select the best migration
+            max_score = old_score
+            best_cluster = cluster
+            temp_perf_migrations = None
+            for index, (_, score) in enumerate(scores):
+                if score < max_score:
+                    max_score = score
+                    best_cluster = clusters[index]
+                    temp_perf_migrations = deepcopy(performed_migrations)
+                    temp_perf_migrations.append({"vm_id":current_migration[0], "source_node": clusters[index].nodes[current_migration[1][0]].name, "target_node": clusters[index].nodes[index].name})
+            allocations.append((max_score, best_cluster, temp_perf_migrations))
+        
+        # Select the best of all migrations performed
         max_score = old_score
-        best_cluster = cluster
-        for index, (_, score) in enumerate(scores):
-            if score < max_score:
-                max_score = score
-                best_cluster = clusters[index]
-                performed_migrations.append({"vm_id":current_migration[0], "source_node": clusters[index].nodes[current_migration[1][0]].name, "target_node": clusters[index].nodes[index].name})
+        for j in range(0, len(allocations)):
+            temp_score, temp_cluster, temp_perf_migrations = allocations[j]
+            if (temp_score < max_score):
+                best_cluster = temp_cluster
+                max_score = temp_score
+                performed_migrations = temp_perf_migrations
         cluster = deepcopy(best_cluster)
-        del(clusters)
-        print(scores)
+        # del(clusters)
+        # print(scores)
         print("Iteration: {0} Score increase: {1}%".format(i, round((max_score-old_score)/old_score * 100, 2)))
         print(performed_migrations)
     return cluster
 
 def main():
 
-    #test_simulation()
+    
 
     start_time = time.time()
+    #test_simulation()
     #cluster = load_cluster_info("week", "average")
     cluster = load_cluster_from_file("snapshots/data_week")
     
     #test_simulation()
-    #_ = cluster.get_average_cpu_usage()
-    plot_cluster_cpu_usage(cluster)
+    # plot_cluster_cpu_usage(cluster)
 
-    old_score = cluster.get_cluster_score(0.10)
-    print(old_score)
+    # old_score = cluster.get_cluster_score(0.10)
+    # print(old_score)
 
-    cluster = balance_cluster(cluster)
+    # cluster = balance_cluster(cluster)
 
-    print(cluster.get_cluster_score(0.10))
+    # print(cluster.get_cluster_score(0.10))
 
 
-    #migrate(161, cluster.nodes[0], cluster.nodes[1], cluster, 10)
     print("Cluster data loaded in --- %s seconds ---" % round(time.time() - start_time,3))
 
-    plot_cluster_cpu_usage(cluster)
+    # plot_cluster_cpu_usage(cluster)
 
-    print(cluster.get_cluster_score(0.10))
+    # print(cluster.get_cluster_score(0.10))
     # Plot all figures
     plt.show()
 
