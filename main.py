@@ -393,6 +393,13 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
 
     return cluster
 
+def perform_migration(vmid, source_node_name, target_node_name):
+    config = yaml.safe_load(open("config.yaml"))
+    proxmox = ProxmoxAPI(config["connection"]["proxmox"]["url"]["ip"], user=config["connection"]["proxmox"]["auth"]["username"], password=config["connection"]["proxmox"]["auth"]["password"], verify_ssl=False)
+
+    upid = proxmox.nodes(source_node_name).qemu(vmid).migrate.post(**{'target': target_node_name, 'online': 1, 'with-local-disks':1})
+    
+
 def plot_cluster_cpu_usage(cluster: Cluster, node_names_list = []):
     
     # Sort cluster nodes by name
@@ -871,6 +878,7 @@ def main():
     #cluster = load_cluster_info("week", "average")
     cluster = load_cluster_from_file("snapshots/data_week")
     
+    perform_migration(114, "pve-g2n6", "pve-g2n8")
     #test_simulation()
     # plot_cluster_cpu_usage(cluster)
 
