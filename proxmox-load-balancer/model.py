@@ -168,9 +168,10 @@ class Cluster:
                     total_sum += record
         return total_sum/(len(self.nodes[0].aggregate_utilization * len(self.nodes)))
     
-    def get_cluster_score(self, threshold = 0.0, sla_threshold = 0.85):
+    def get_cluster_score(self, threshold = 0.15, sla_threshold = 0.85):
         total_sum = 0
         n = 0
+        active_n = 0
         sla_n = 0
         for i in range(0, len(self.nodes)):
             for record in self.nodes[i].aggregate_utilization:

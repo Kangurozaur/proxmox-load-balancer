@@ -64,7 +64,7 @@ def reschedule_node(node, overload_timestamps, vm_id = None):
     j = 0
     while j < len(overload_timestamps):
         time_index = overload_timestamps[j]
-        scheduled_cores, idle_constants = round_robin_scheduler(node, time_index, 0.5, vm_id)
+        scheduled_cores, idle_constants = round_robin_scheduler(node, time_index, 0.01, vm_id)
         
         # Reassign the newly scheduled cores for each VM, along with the utilization
         for i, new_cores in enumerate(scheduled_cores):

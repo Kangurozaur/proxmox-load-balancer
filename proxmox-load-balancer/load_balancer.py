@@ -1,6 +1,7 @@
 from copy import deepcopy
 from model import Cluster
 from simulation import migrate
+from util import plot_cluster_cpu_usage
 
 
 def find_migrations(cluster: Cluster):
@@ -54,50 +55,58 @@ def mm_policy(host_list, time_index):
 
 def balance_cluster(cluster):
     performed_migrations = []
+    final_scores = []
+    vm_selection_depth = 10
+
     for i in range(0, 55):
         migrations = find_migrations(cluster)
-        _, old_score = cluster.get_cluster_score(0.0)
+        _, old_score = cluster.get_cluster_score()
         current_migration = None
         allocations = []
         migrationsList = [(k, v) for k, v in migrations.items()]
-        migrationsList.sort(key=lambda a: a[1][1], reverse=True)
-        for j in range(0, 10):
+        migrationsList.sort(key=lambda a: a[1][1], reverse=False)
+        for j in range(0, vm_selection_depth):
             key = migrationsList[j][0]
             current_migration = (key, migrations[key])
         
             # Perform the current migration for each potential target node
-            scores = [(100, 100) for x in range(0, len(cluster.nodes))]
+            scores = [(100000000, 1000000000) for x in range(0, len(cluster.nodes))]
             clusters = []
             for j in range(0, len(cluster.nodes)):
                 new_cluster = None
                 if j != current_migration[1][0]:
                     new_cluster = deepcopy(cluster)
                     migrate(current_migration[0], new_cluster.nodes[current_migration[1][0]], new_cluster.nodes[j], new_cluster)
-                    scores[j] = new_cluster.get_cluster_score(0.0)
+                    scores[j] = new_cluster.get_cluster_score()
                 clusters.append(new_cluster)
+            print(scores)
             # Select the best migration
-            max_score = old_score
+            min_score = old_score
             best_cluster = cluster
             temp_perf_migrations = None
             for index, (_, score) in enumerate(scores):
-                if score < max_score:
-                    max_score = score
+                if score < min_score:
+                    min_score = score
                     best_cluster = clusters[index]
                     temp_perf_migrations = deepcopy(performed_migrations)
                     temp_perf_migrations.append({"vm_id":current_migration[0], "source_node": clusters[index].nodes[current_migration[1][0]].name, "target_node": clusters[index].nodes[index].name})
-            allocations.append((max_score, best_cluster, temp_perf_migrations))
+            allocations.append((min_score, best_cluster, temp_perf_migrations))
         
         # Select the best of all migrations performed
-        max_score = old_score
+        min_score = old_score
         for j in range(0, len(allocations)):
             temp_score, temp_cluster, temp_perf_migrations = allocations[j]
-            if (temp_score < max_score):
+            if (temp_score < min_score):
                 best_cluster = temp_cluster
-                max_score = temp_score
+                min_score = temp_score
                 performed_migrations = temp_perf_migrations
         cluster = deepcopy(best_cluster)
-        # del(clusters)
-        # print(scores)
-        print("Iteration: {0} Score increase: {1}%".format(i, round((max_score-old_score)/old_score * 100, 2)))
+        print("Iteration: {0} Score increase: {1}%".format(i, round((min_score-old_score)/old_score * 100, 2)))
         print(performed_migrations)
+        final_scores.append(min_score)
+        if (old_score == min_score):
+            break
+        #plot_cluster_cpu_usage(cluster, [])
+        
+    print(final_scores)
     return cluster
