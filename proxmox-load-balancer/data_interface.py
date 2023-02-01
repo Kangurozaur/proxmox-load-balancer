@@ -141,6 +141,27 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
             step=chunk_size
         )
 
+        mem_max_data = prom.custom_query_range(
+            '(pve_memory_size_bytes * on(id, instance) group_left(name, type,node) pve_guest_info{instance = "10.71.172.10", type = "qemu"}) and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
+        mem_usage_data = prom.custom_query_range(
+            '(pve_memory_usage_bytes * on(id, instance) group_left(name, type,node) pve_guest_info{instance = "10.71.172.10", type = "qemu"}) and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
+        disk_usage_data = prom.custom_query_range(
+            '(pve_disk_size_bytes * on(id, instance) group_left(name, type,node) pve_guest_info{instance = "10.71.172.10", type = "qemu"}) and on(id, instance) pve_up == 1',
+            start_time=start_time,
+            end_time=end_time,
+            step=chunk_size
+        )
+
         nodes_cpu_max_data = prom.custom_query_range(
             'pve_cpu_usage_limit{instance = "10.71.172.10", id =~"node/.*"} and on(id, instance) pve_up == 1',
             start_time=start_time,
@@ -183,7 +204,7 @@ def load_cluster_info(timeframe="week", cf="AVERAGE") -> Cluster:
                 current_node.add_vm(current_vm)
             
             for series_index, series in enumerate(cpu_data_entry["values"]):
-                current_usage_record = VmUsageRecord(time=series[0], cpu=float(series[1]), maxcpu=int(cpu_max_data[entry_index]["values"][series_index][1]))
+                current_usage_record = VmUsageRecord(time=series[0], cpu=float(series[1]), maxcpu=int(cpu_max_data[entry_index]["values"][series_index][1]), disk=int(disk_usage_data[entry_index]["values"][series_index][1]), mem=int(mem_usage_data[entry_index]["values"][series_index][1]), maxmem=int(mem_max_data[entry_index]["values"][series_index][1]))
                 current_vm.add_usage_record(current_usage_record)
             
         _ = cluster.get_average_cpu_usage()
