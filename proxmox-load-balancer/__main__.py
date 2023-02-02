@@ -15,7 +15,7 @@ def main():
     #     print('passed argument :: {}'.format(arg))
     start_time = time.time()
     #test_simulation()
-    cluster = load_cluster_info("week", "average")
+    #cluster = load_cluster_info("week", "average")
     #save_cluster_to_file(cluster, "proxmox-load-balancer/snapshots/data_week_2")
     
     cluster = load_cluster_from_file("proxmox-load-balancer/snapshots/data_week_2")

@@ -1,4 +1,5 @@
 from copy import deepcopy
+import time
 from model import Cluster
 from simulation import migrate
 from util import plot_cluster_cpu_usage
@@ -59,13 +60,14 @@ def balance_cluster(cluster):
     vm_selection_depth = 10
 
     for i in range(0, 55):
+        start_time = time.time()
         migrations = find_migrations(cluster)
         _, old_score = cluster.get_cluster_score()
         current_migration = None
         allocations = []
         migrationsList = [(k, v) for k, v in migrations.items()]
         migrationsList.sort(key=lambda a: a[1][1], reverse=False)
-        for j in range(0, vm_selection_depth):
+        for j in range(0, len(migrationsList)):
             key = migrationsList[j][0]
             current_migration = (key, migrations[key])
         
@@ -101,7 +103,8 @@ def balance_cluster(cluster):
                 min_score = temp_score
                 performed_migrations = temp_perf_migrations
         cluster = deepcopy(best_cluster)
-        print("Iteration: {0} Score increase: {1}%".format(i, round((min_score-old_score)/old_score * 100, 2)))
+        print("Iteration: {0} Score increase: {1}%. Current score: {2}".format(i, round((min_score-old_score)/old_score * 100, 2), min_score))
+        print("Iteration performed in --- %s seconds ---" % round(time.time() - start_time,3))
         print(performed_migrations)
         final_scores.append(min_score)
         if (old_score == min_score):
