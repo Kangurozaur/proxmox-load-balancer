@@ -121,8 +121,9 @@ venv.bak/
 /site
 
 #snapshots
-/snapshots
-
+/balancer/snapshots
+/balancer/test/snapshots
+/logs
 # mypy
 .mypy_cache/
 .dmypy.json
