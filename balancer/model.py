@@ -180,7 +180,7 @@ class Cluster:
                         n += 1
                     if record >= sla_threshold:
                         sla_n += 1
-        return (total_sum/n, sla_n)
+        return (sla_n/n, sla_n)
     def get_node_by_name(self, name):
         for node in self.nodes:
             if node.name == name:

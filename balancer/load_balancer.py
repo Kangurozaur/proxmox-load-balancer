@@ -28,8 +28,10 @@ def mm_policy(host_list, time_index):
         vm_list = []
         # Prepare vm list
         for vm in host.vms:
-            vm_list.append((vm.id, vm.utilization[time_index].cpu * vm.utilization[time_index].maxcpu))
-        
+            try:
+                vm_list.append((vm.id, vm.utilization[time_index].cpu * vm.utilization[time_index].maxcpu))
+            except:
+                pass
         vm_list.sort(key=lambda a: a[1], reverse = True)
 
         h_max_cpu = host.utilization[time_index].maxcpu
@@ -56,13 +58,23 @@ def mm_policy(host_list, time_index):
             best_fit_vm = None
     return migration_list
 
+def get_migration_cost(cluster, migration):
+    config = Config.getInstance().config
+    bandwidth = config["parameters"]["bandwidth"]
+    _, vm = cluster.nodes[migration[1][0]].get_vm_by_vmid(migration[0])
+    time_interval = vm.utilization[1].time - vm.utilization[0].time
+    return (vm.utilization[0].disk + vm.utilization[0].mem)/(1000000*(bandwidth/8) * time_interval)
+
 def balance_cluster(cluster):
     performed_migrations = []
     final_scores = []
     config = Config.getInstance().config
+    w_sla = config["parameters"]["weight_sla"]
+    w_mig = config["parameters"]["weight_mig"]
     vm_selection_depth = config["parameters"]["vm_selection_depth"]
 
-    for i in range(0, 55):
+    i = 0
+    while True:
         start_time = time.time()
         migrations = find_migrations(cluster)
         _, old_score = cluster.get_cluster_score()
@@ -75,26 +87,28 @@ def balance_cluster(cluster):
             current_migration = (key, migrations[key])
         
             # Perform the current migration for each potential target node
-            scores = [(100000000, 1000000000) for x in range(0, len(cluster.nodes))]
+            scores = [(100000000, 1000000000, 100000000) for x in range(0, len(cluster.nodes))]
             clusters = []
             for j in range(0, len(cluster.nodes)):
                 new_cluster = None
                 if j != current_migration[1][0]:
                     new_cluster = deepcopy(cluster)
                     migrate(current_migration[0], new_cluster.nodes[current_migration[1][0]], new_cluster.nodes[j], new_cluster)
-                    scores[j] = new_cluster.get_cluster_score()
+                    (sla_score, sla_count) = new_cluster.get_cluster_score()
+                    mig_cost = get_migration_cost(cluster, current_migration)
+                    scores[j] = (w_sla * sla_score  + w_mig * mig_cost, sla_count, mig_cost) 
                 clusters.append(new_cluster)
             #print(scores)
             # Select the best migration
             min_score = old_score
             best_cluster = cluster
             temp_perf_migrations = None
-            for index, (_, score) in enumerate(scores):
+            for index, (sla_count, score, mig_time) in enumerate(scores):
                 if score < min_score:
                     min_score = score
                     best_cluster = clusters[index]
                     temp_perf_migrations = deepcopy(performed_migrations)
-                    temp_perf_migrations.append({"vm_id":current_migration[0], "source_node": clusters[index].nodes[current_migration[1][0]].name, "target_node": clusters[index].nodes[index].name, "old_score": old_score, "new_score": min_score})
+                    temp_perf_migrations.append({"vm_id":current_migration[0], "source_node": clusters[index].nodes[current_migration[1][0]].name, "target_node": clusters[index].nodes[index].name, "old_score": old_score, "new_score": min_score, "sla_count": sla_count, "mig_time":mig_time})
             allocations.append((min_score, best_cluster, temp_perf_migrations))
         
         # Select the best of all migrations performed
@@ -106,12 +120,14 @@ def balance_cluster(cluster):
                 min_score = temp_score
                 performed_migrations = temp_perf_migrations
         cluster = deepcopy(best_cluster)
-        print("Iteration: {0} Score decrease: {1}%. Current score: {2}".format(i, round((old_score-min_score)/old_score * 100, 2), min_score))
-        logging.info("Iteration: {0} Score decrease: {1}%. Current score: {2}".format(i, round((old_score-min_score)/old_score * 100, 2), min_score))
+
+        print("Iteration: {0} Cost decrease: {1}%. Current cost: {2}.".format(i, round((old_score-min_score)/old_score * 100, 2), min_score))
+        logging.info("Iteration: {0} Cost decrease: {1}%. Current cost: {2}.".format(i, round((old_score-min_score)/old_score * 100, 2), min_score))
         print("Iteration performed in --- %s seconds ---" % round(time.time() - start_time,3))
         logging.info("Iteration performed in --- %s seconds ---" % round(time.time() - start_time,3))
-        print(performed_migrations)
+        
         final_scores.append(min_score)
+        i += 1
         if (old_score == min_score):
             break
     for migration in performed_migrations:
